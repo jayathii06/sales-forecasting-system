@@ -23,15 +23,11 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.data_preprocessing import prepare_data
 from models.forecast import forecast_state, forecast_all_states
 
-# ─────────────────────────────────────────────
-# App setup
-# ─────────────────────────────────────────────
 
 app = FastAPI(
     title="Sales Forecasting API",
@@ -46,7 +42,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global data cache — loaded once on startup
 _df_cache: Optional[pd.DataFrame] = None
 MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "sales_data.xlsx")
@@ -59,9 +54,6 @@ def get_data() -> pd.DataFrame:
     return _df_cache
 
 
-# ─────────────────────────────────────────────
-# Response schemas
-# ─────────────────────────────────────────────
 
 class ForecastPoint(BaseModel):
     forecast_date: str
@@ -85,9 +77,6 @@ class ModelInfo(BaseModel):
     MAPE: float
 
 
-# ─────────────────────────────────────────────
-# Endpoints
-# ─────────────────────────────────────────────
 
 @app.get("/", tags=["Health"])
 def health_check():
@@ -128,7 +117,6 @@ def get_forecast(
     """Get n-week sales forecast for a specific state."""
     df = get_data()
 
-    # Normalize state name
     state_title = state.replace("-", " ").title()
     available = df["State"].unique()
     if state_title not in available:
@@ -184,7 +172,6 @@ def get_all_forecasts(weeks: int = Query(default=8, ge=1, le=26)):
     }
 
 
-# Retrain endpoint
 _training_status = {"status": "idle", "started_at": None, "message": ""}
 
 
@@ -217,9 +204,6 @@ def retrain_status():
     return _training_status
 
 
-# ─────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
