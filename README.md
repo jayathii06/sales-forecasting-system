@@ -260,3 +260,4 @@ curl http://localhost:8000/model-comparison
 3. US public holidays used for holiday flagging
 4. Validation set = last 8 weeks of historical data (no leakage)
 5. Models retrained from scratch each time `retrain` is called
+
