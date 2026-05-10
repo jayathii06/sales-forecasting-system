@@ -1,8 +1,3 @@
-"""
-Forecasting Inference Module - Fixed for deployment
-Falls back to XGBoost if LSTM fails to load
-"""
-
 import os
 import joblib
 import numpy as np
@@ -56,7 +51,6 @@ def forecast_xgboost_walk(model, state_df, n_weeks=8):
 
 
 def retrain_xgboost(df, state, n_weeks=8):
-    """Retrain XGBoost on the fly for a state."""
     from xgboost import XGBRegressor
     sdf = df[df["State"] == state].sort_values("Date").copy()
     sdf["Sales"] = sdf["Sales"].ffill().bfill().fillna(0)
@@ -70,14 +64,13 @@ def retrain_xgboost(df, state, n_weeks=8):
 
 
 def forecast_state(state, df, model_dir="models", n_weeks=8):
-    """Load best model and forecast. Falls back to XGBoost if LSTM fails."""
     state_key = state.replace(" ", "_")
     model_path = f"{model_dir}/{state_key}_best_model.pkl"
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"No trained model found for state: {state}")
 
-    artifact = joblib.load(model_path)
+    artifact   = joblib.load(model_path)
     model_name = artifact["model_name"]
     model      = artifact["model"]
 
@@ -88,21 +81,19 @@ def forecast_state(state, df, model_dir="models", n_weeks=8):
 
     preds = None
 
-    # Try best model
     try:
         if model_name == "SARIMA":
             preds = np.maximum(np.array(model.forecast(steps=n_weeks)), 0)
 
         elif model_name == "Prophet":
             future = model.make_future_dataframe(periods=n_weeks, freq="W")
-            fc = model.predict(future)
-            preds = np.maximum(fc["yhat"].tail(n_weeks).values, 0)
+            fc     = model.predict(future)
+            preds  = np.maximum(fc["yhat"].tail(n_weeks).values, 0)
 
         elif model_name == "XGBoost":
             preds = forecast_xgboost_walk(model, state_df, n_weeks)
 
         elif model_name == "LSTM":
-            # Try loading LSTM - may fail due to TF version mismatch
             scaler = artifact["scaler"]
             sales  = state_df["Sales"].values
             scaled = scaler.transform(sales.reshape(-1, 1)).flatten()
@@ -120,10 +111,9 @@ def forecast_state(state, df, model_dir="models", n_weeks=8):
             )
 
     except Exception as e:
-        print(f"  {model_name} failed ({e}) — retraining XGBoost fallback...")
+        print(f"Model {model_name} failed: {str(e)} - using XGBoost fallback")
         preds = None
 
-    # Fallback to fresh XGBoost if anything failed
     if preds is None:
         xgb, sdf = retrain_xgboost(df, state, n_weeks)
         preds     = forecast_xgboost_walk(xgb, sdf, n_weeks)
@@ -151,5 +141,5 @@ def forecast_all_states(df, model_dir="models", n_weeks=8):
             result = forecast_state(state, df, model_dir, n_weeks)
             all_forecasts.append(result)
         except Exception as e:
-            print(f"  Warning: {state}: {e}")
+            print(f"Warning: {state}: {str(e)}")
     return pd.concat(all_forecasts, ignore_index=True)
