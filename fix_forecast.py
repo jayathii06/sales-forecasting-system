@@ -1,4 +1,9 @@
 """
+Run this: python fix_forecast.py
+Completely rewrites models/forecast.py with LSTM fallback
+"""
+
+code = '''"""
 Forecasting Inference Module - Fixed for deployment
 Falls back to XGBoost if LSTM fails to load
 """
@@ -120,7 +125,7 @@ def forecast_state(state, df, model_dir="models", n_weeks=8):
             )
 
     except Exception as e:
-        print(f"  {model_name} failed ({e}) — retraining XGBoost fallback...")
+        print(f"  {model_name} failed ({e}) â€” retraining XGBoost fallback...")
         preds = None
 
     # Fallback to fresh XGBoost if anything failed
@@ -153,3 +158,8 @@ def forecast_all_states(df, model_dir="models", n_weeks=8):
         except Exception as e:
             print(f"  Warning: {state}: {e}")
     return pd.concat(all_forecasts, ignore_index=True)
+'''
+
+with open("models/forecast.py", "w") as f:
+    f.write(code)
+print("models/forecast.py rewritten successfully!")
