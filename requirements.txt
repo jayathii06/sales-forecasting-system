@@ -14,4 +14,4 @@ seaborn==0.12.2
 holidays==0.46
 pydantic==2.5.0
 requests==2.31.0
-python-multipart==0.0.9python-multipart==0.0.9 
+python-multipart==0.0.9
