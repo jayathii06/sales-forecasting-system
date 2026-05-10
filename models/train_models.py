@@ -25,7 +25,6 @@ FEATURE_COLS = [
 LOOKBACK = 13
 
 
-# ── Metrics ──────────────────────────────────────────────
 
 def mape_score(y_true, y_pred):
     y_true, y_pred = np.array(y_true), np.array(y_pred)
@@ -43,7 +42,6 @@ def evaluate(y_true, y_pred):
     }
 
 
-# ── Data prep for one state ───────────────────────────────
 
 def get_state_data(df, state, val_weeks=8):
     sdf = df[df["State"] == state].sort_values("Date").copy()
@@ -58,7 +56,6 @@ def get_state_data(df, state, val_weeks=8):
     return sdf, train, val
 
 
-# ── SARIMA ───────────────────────────────────────────────
 
 def train_sarima(train_series, val_steps=8):
     from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -74,7 +71,6 @@ def train_sarima(train_series, val_steps=8):
     return fit, np.maximum(np.array(preds), 0)
 
 
-# ── Prophet ──────────────────────────────────────────────
 
 def train_prophet(train_df, val_steps=8):
     from prophet import Prophet
@@ -88,7 +84,6 @@ def train_prophet(train_df, val_steps=8):
     return m, np.maximum(preds, 0)
 
 
-# ── XGBoost ──────────────────────────────────────────────
 
 def train_xgboost(train, val):
     from xgboost import XGBRegressor
@@ -103,7 +98,6 @@ def train_xgboost(train, val):
     return m, np.maximum(preds, 0)
 
 
-# ── LSTM ─────────────────────────────────────────────────
 
 def train_lstm(train_series, val_steps=8):
     import tensorflow as tf
@@ -148,7 +142,6 @@ def train_lstm(train_series, val_steps=8):
     return model, scaler, np.maximum(preds, 0)
 
 
-# ── Main training loop ────────────────────────────────────
 
 def train_all_models(df, model_dir="models", val_weeks=8):
     os.makedirs(model_dir, exist_ok=True)
@@ -212,12 +205,10 @@ def train_all_models(df, model_dir="models", val_weeks=8):
             print(f"  ⚠ All models failed for {state}")
             continue
 
-        # Pick best by MAPE
         best_name = min(results, key=lambda k: results[k]["metrics"]["MAPE"])
         best = results[best_name]
         print(f"  ✅ Best: {best_name} (MAPE {best['metrics']['MAPE']:.1f}%)\n")
 
-        # Save
         state_key = state.replace(" ", "_")
         artifact = {
             "state": state,

@@ -1,26 +1,20 @@
 """
 FastAPI REST API for Sales Forecasting
-Run with: uvicorn api.main:app --reload --port 8000
-
-Endpoints:
-  GET  /                          → health check
-  GET  /states                    → list all states with trained models
-  GET  /forecast/{state}          → 8-week forecast for a state
-  GET  /forecast/all              → 8-week forecast for all states
-  GET  /model-comparison          → model metrics comparison table
-  POST /retrain                   → trigger retraining (async)
+Supports both the default dataset and custom Excel file uploads
 """
 
 import os
 import sys
-import json
+import shutil
+import tempfile
 import asyncio
 from typing import List, Optional
 from datetime import datetime
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,11 +22,24 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.data_preprocessing import prepare_data
 from models.forecast import forecast_state, forecast_all_states
 
-
+# ─────────────────────────────────────────────
 app = FastAPI(
     title="Sales Forecasting API",
-    description="8-week ahead sales forecasting per US state using best ML/DL models",
-    version="1.0.0",
+    description="""
+## 8-Week Sales Forecasting API
+
+Forecasts next 8 weeks of sales per US state using the best of:
+- SARIMA
+- Facebook Prophet  
+- XGBoost
+- LSTM (Deep Learning)
+
+### Usage
+- Use `/forecast/{state}` for a specific state
+- Use `/forecast` for all states
+- Use `/upload-and-forecast` to upload your own Excel file
+    """,
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -42,9 +49,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+MODEL_DIR  = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+DATA_PATH  = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "sales_data.xlsx")
+
 _df_cache: Optional[pd.DataFrame] = None
-MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
-DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "sales_data.xlsx")
+_training_status = {"status": "idle", "started_at": None, "message": ""}
 
 
 def get_data() -> pd.DataFrame:
@@ -54,6 +63,9 @@ def get_data() -> pd.DataFrame:
     return _df_cache
 
 
+# ─────────────────────────────────────────────
+# Schemas
+# ─────────────────────────────────────────────
 
 class ForecastPoint(BaseModel):
     forecast_date: str
@@ -69,28 +81,31 @@ class ForecastResponse(BaseModel):
     generated_at: str
 
 
-class ModelInfo(BaseModel):
-    state: str
-    model_used: str
-    MAE: float
-    RMSE: float
-    MAPE: float
-
-
+# ─────────────────────────────────────────────
+# Endpoints
+# ─────────────────────────────────────────────
 
 @app.get("/", tags=["Health"])
 def health_check():
     return {
         "status": "ok",
         "service": "Sales Forecasting API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "timestamp": datetime.utcnow().isoformat(),
+        "endpoints": {
+            "docs":              "/docs",
+            "list_states":       "/states",
+            "forecast_state":    "/forecast/{state}",
+            "forecast_all":      "/forecast",
+            "upload_forecast":   "/upload-and-forecast",
+            "model_comparison":  "/model-comparison",
+        }
     }
 
 
 @app.get("/states", tags=["Info"])
 def list_states():
-    """Return all states that have a trained model."""
+    """List all states that have a trained model."""
     model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith("_best_model.pkl")]
     states = sorted([f.replace("_best_model.pkl", "").replace("_", " ") for f in model_files])
     return {"total": len(states), "states": states}
@@ -98,12 +113,13 @@ def list_states():
 
 @app.get("/model-comparison", tags=["Info"])
 def model_comparison():
-    """Return model comparison metrics for all states."""
+    """Return model metrics comparison for all states."""
     csv_path = os.path.join(MODEL_DIR, "model_comparison.csv")
     if not os.path.exists(csv_path):
-        raise HTTPException(status_code=404, detail="model_comparison.csv not found. Run training first.")
+        raise HTTPException(status_code=404, detail="Run training first.")
     df = pd.read_csv(csv_path)
     return {
+        "total_records": len(df),
         "columns": list(df.columns),
         "data": df.to_dict(orient="records"),
     }
@@ -112,17 +128,17 @@ def model_comparison():
 @app.get("/forecast/{state}", response_model=ForecastResponse, tags=["Forecast"])
 def get_forecast(
     state: str,
-    weeks: int = Query(default=8, ge=1, le=26, description="Number of weeks to forecast"),
+    weeks: int = Query(default=8, ge=1, le=26),
 ):
-    """Get n-week sales forecast for a specific state."""
+    """Get 8-week sales forecast for a specific state."""
     df = get_data()
-
     state_title = state.replace("-", " ").title()
-    available = df["State"].unique()
-    if state_title not in available:
+
+    if state_title not in df["State"].unique():
+        available = sorted(df["State"].unique().tolist())
         raise HTTPException(
             status_code=404,
-            detail=f"State '{state_title}' not found. Available: {sorted(available)[:5]}...",
+            detail=f"State '{state_title}' not found. Available states: {available}"
         )
 
     try:
@@ -135,10 +151,10 @@ def get_forecast(
     forecast_points = [
         ForecastPoint(
             forecast_date=str(row["forecast_date"].date()),
-            predicted_sales=row["predicted_sales"],
+            predicted_sales=round(float(row["predicted_sales"]), 2),
             week_number=i + 1,
         )
-        for i, row in result_df.iterrows()
+        for i, (_, row) in enumerate(result_df.iterrows())
     ]
 
     return ForecastResponse(
@@ -156,7 +172,7 @@ def get_forecast(
 
 @app.get("/forecast", tags=["Forecast"])
 def get_all_forecasts(weeks: int = Query(default=8, ge=1, le=26)):
-    """Get 8-week forecasts for all states."""
+    """Get forecasts for ALL states."""
     df = get_data()
     try:
         result_df = forecast_all_states(df, MODEL_DIR, n_weeks=weeks)
@@ -166,19 +182,94 @@ def get_all_forecasts(weeks: int = Query(default=8, ge=1, le=26)):
     result_df["forecast_date"] = result_df["forecast_date"].astype(str)
     return {
         "total_states": result_df["state"].nunique(),
-        "weeks_ahead": weeks,
+        "weeks_ahead":  weeks,
         "generated_at": datetime.utcnow().isoformat(),
-        "forecasts": result_df.to_dict(orient="records"),
+        "forecasts":    result_df.to_dict(orient="records"),
     }
 
 
-_training_status = {"status": "idle", "started_at": None, "message": ""}
+@app.post("/upload-and-forecast", tags=["Custom Data"])
+async def upload_and_forecast(
+    file: UploadFile = File(..., description="Excel file with columns: State, Date, Total/Sales"),
+    weeks: int = Query(default=8, ge=1, le=26),
+    retrain: bool = Query(default=False, description="Set True to retrain models on uploaded data"),
+):
+    """
+    Upload your own Excel file and get 8-week forecasts.
+    
+    Expected Excel columns:
+    - **State** — state name
+    - **Date** — date of sales record  
+    - **Total** or **Sales** — sales amount
+    
+    Set `retrain=true` to train new models on your data (takes 30-60 mins).
+    Set `retrain=false` to use existing trained models (instant).
+    """
+    # Validate file type
+    if not file.filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Only Excel files (.xlsx, .xls) are supported.")
+
+    # Save uploaded file to temp location
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # Preprocess uploaded file
+        try:
+            df = prepare_data(tmp_path)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Could not process file: {e}")
+
+        states_found = sorted(df["State"].unique().tolist())
+
+        if retrain:
+            # Train new models on uploaded data
+            from models.train_models import train_all_models
+            summary = train_all_models(df, MODEL_DIR)
+            global _df_cache
+            _df_cache = df
+
+        # Generate forecasts using existing or newly trained models
+        results = []
+        for state in states_found:
+            try:
+                fc = forecast_state(state, df, MODEL_DIR, n_weeks=weeks)
+                fc["forecast_date"] = fc["forecast_date"].astype(str)
+                results.append({
+                    "state":      state,
+                    "model_used": fc["model_used"].iloc[0],
+                    "MAPE":       fc["MAPE"].iloc[0],
+                    "forecast":   fc[["forecast_date", "predicted_sales"]].to_dict(orient="records"),
+                })
+            except Exception as e:
+                results.append({"state": state, "error": str(e)})
+
+        return {
+            "filename":     file.filename,
+            "states_found": len(states_found),
+            "weeks_ahead":  weeks,
+            "retrained":    retrain,
+            "generated_at": datetime.utcnow().isoformat(),
+            "forecasts":    results,
+        }
+
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
+# Retrain endpoints
 def _run_training():
     global _df_cache, _training_status
     try:
-        _training_status = {"status": "running", "started_at": datetime.utcnow().isoformat(), "message": "Training started..."}
+        _training_status = {
+            "status": "running",
+            "started_at": datetime.utcnow().isoformat(),
+            "message": "Training started..."
+        }
         from models.train_models import train_all_models
         df = prepare_data(DATA_PATH)
         _df_cache = df
@@ -196,7 +287,7 @@ def retrain(background_tasks: BackgroundTasks):
     if _training_status["status"] == "running":
         return {"message": "Training already in progress.", "status": _training_status}
     background_tasks.add_task(_run_training)
-    return {"message": "Retraining started in background. Check /retrain/status for updates."}
+    return {"message": "Retraining started. Check /retrain/status for updates."}
 
 
 @app.get("/retrain/status", tags=["Admin"])
@@ -204,7 +295,6 @@ def retrain_status():
     return _training_status
 
 
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("api.main:app", host="0.0.0.0", port=8000, reload=False)

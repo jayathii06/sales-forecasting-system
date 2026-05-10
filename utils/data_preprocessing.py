@@ -19,7 +19,6 @@ def prepare_data(filepath: str) -> pd.DataFrame:
     print(f"      Rows: {len(df)}, States: {df['State'].nunique()}")
 
     print("[2/4] Aggregating to weekly frequency...")
-    # Use the data's OWN week boundaries - do NOT force Monday
     df["Date"] = df["Date"].dt.to_period("W").dt.start_time
     df = df.groupby(["State", "Date"], as_index=False)["Sales"].sum()
     print(f"      Weekly rows: {len(df)}")
