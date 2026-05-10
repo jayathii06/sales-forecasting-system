@@ -16,7 +16,9 @@ FEATURE_COLS = [
 
 
 def get_future_dates(last_date, n_weeks=8):
-    return pd.date_range(start=last_date + pd.Timedelta(weeks=1), periods=n_weeks, freq="W")
+    return pd.date_range(
+        start=last_date + pd.Timedelta(weeks=1), periods=n_weeks, freq="W"
+    )
 
 
 def forecast_xgboost_walk(model, state_df, n_weeks=8):
@@ -24,7 +26,7 @@ def forecast_xgboost_walk(model, state_df, n_weeks=8):
     us_holidays = hols.US(years=range(2018, 2030))
     history = state_df.copy().sort_values("Date")
     preds = []
-    for i in range(n_weeks):
+    for _ in range(n_weeks):
         next_date = history["Date"].max() + pd.Timedelta(weeks=1)
         s = history["Sales"]
         feat = {
@@ -45,8 +47,10 @@ def forecast_xgboost_walk(model, state_df, n_weeks=8):
         }
         p = max(float(model.predict(pd.DataFrame([feat]))[0]), 0)
         preds.append(p)
-        history = pd.concat([history, pd.DataFrame({"Date": [next_date], "Sales": [p]})],
-                           ignore_index=True)
+        history = pd.concat(
+            [history, pd.DataFrame({"Date": [next_date], "Sales": [p]})],
+            ignore_index=True,
+        )
     return np.array(preds)
 
 
@@ -64,8 +68,8 @@ def retrain_xgboost(df, state, n_weeks=8):
 
 
 def forecast_state(state, df, model_dir="models", n_weeks=8):
-    state_key = state.replace(" ", "_")
-    model_path = f"{model_dir}/{state_key}_best_model.pkl"
+    state_key  = state.replace(" ", "_")
+    model_path = os.path.join(model_dir, f"{state_key}_best_model.pkl")
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"No trained model found for state: {state}")
@@ -93,31 +97,14 @@ def forecast_state(state, df, model_dir="models", n_weeks=8):
         elif model_name == "XGBoost":
             preds = forecast_xgboost_walk(model, state_df, n_weeks)
 
-        elif model_name == "LSTM":
-            scaler = artifact["scaler"]
-            sales  = state_df["Sales"].values
-            scaled = scaler.transform(sales.reshape(-1, 1)).flatten()
-            history = list(scaled[-LOOKBACK:])
-            preds_scaled = []
-            for _ in range(n_weeks):
-                seq = np.array(history[-LOOKBACK:]).reshape(1, LOOKBACK, 1)
-                p   = float(model.predict(seq, verbose=0)[0][0])
-                preds_scaled.append(p)
-                history.append(p)
-            preds = np.maximum(
-                scaler.inverse_transform(
-                    np.array(preds_scaled).reshape(-1, 1)
-                ).flatten(), 0
-            )
-
     except Exception as e:
-        print(f"Model {model_name} failed: {str(e)} - using XGBoost fallback")
+        print(f"Model {model_name} failed: {e} — falling back to XGBoost")
         preds = None
 
     if preds is None:
         xgb, sdf = retrain_xgboost(df, state, n_weeks)
-        preds     = forecast_xgboost_walk(xgb, sdf, n_weeks)
-        model_name = "XGBoost"
+        preds      = forecast_xgboost_walk(xgb, sdf, n_weeks)
+        model_name = "XGBoost (fallback)"
 
     return pd.DataFrame({
         "state":           state,
@@ -141,5 +128,5 @@ def forecast_all_states(df, model_dir="models", n_weeks=8):
             result = forecast_state(state, df, model_dir, n_weeks)
             all_forecasts.append(result)
         except Exception as e:
-            print(f"Warning: {state}: {str(e)}")
+            print(f"Warning: {state}: {e}")
     return pd.concat(all_forecasts, ignore_index=True)

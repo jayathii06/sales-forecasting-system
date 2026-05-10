@@ -1,7 +1,11 @@
 """
-Model Training Module - Clean Rewrite
+Model Training Module
 Trains SARIMA, Prophet, XGBoost, LSTM per state
 Picks best model by MAPE on last 8 weeks validation
+
+LSTM is saved in two formats:
+  - <state>_lstm.h5         (Keras weights, for retraining reference)
+  - <state>_lstm.onnx       (ONNX runtime, used by the API on Render)
 """
 
 import os
@@ -25,6 +29,9 @@ FEATURE_COLS = [
 LOOKBACK = 13
 
 
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
 
 def mape_score(y_true, y_pred):
     y_true, y_pred = np.array(y_true), np.array(y_pred)
@@ -42,13 +49,10 @@ def evaluate(y_true, y_pred):
     }
 
 
-
 def get_state_data(df, state, val_weeks=8):
     sdf = df[df["State"] == state].sort_values("Date").copy()
-    # Ensure Sales has no nulls
     sdf["Sales"] = pd.to_numeric(sdf["Sales"], errors="coerce")
     sdf["Sales"] = sdf["Sales"].ffill().bfill().fillna(0)
-    # Fill feature columns
     fill_vals = sdf[FEATURE_COLS].mean().fillna(0)
     sdf[FEATURE_COLS] = sdf[FEATURE_COLS].fillna(fill_vals)
     train = sdf.iloc[:-val_weeks].copy()
@@ -56,6 +60,9 @@ def get_state_data(df, state, val_weeks=8):
     return sdf, train, val
 
 
+# ─────────────────────────────────────────────
+# Model trainers
+# ─────────────────────────────────────────────
 
 def train_sarima(train_series, val_steps=8):
     from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -71,7 +78,6 @@ def train_sarima(train_series, val_steps=8):
     return fit, np.maximum(np.array(preds), 0)
 
 
-
 def train_prophet(train_df, val_steps=8):
     from prophet import Prophet
     pdf = train_df[["Date", "Sales"]].rename(columns={"Date": "ds", "Sales": "y"})
@@ -84,13 +90,11 @@ def train_prophet(train_df, val_steps=8):
     return m, np.maximum(preds, 0)
 
 
-
 def train_xgboost(train, val):
     from xgboost import XGBRegressor
     X_train = train[FEATURE_COLS].fillna(0)
     y_train = train["Sales"].fillna(0)
     X_val   = val[FEATURE_COLS].fillna(0)
-
     m = XGBRegressor(n_estimators=300, learning_rate=0.05, max_depth=4,
                      subsample=0.8, colsample_bytree=0.8, random_state=42, verbosity=0)
     m.fit(X_train, y_train)
@@ -98,12 +102,18 @@ def train_xgboost(train, val):
     return m, np.maximum(preds, 0)
 
 
-
-def train_lstm(train_series, val_steps=8):
+def train_lstm(train_series, val_steps=8, state_key=None, model_dir="models"):
+    """
+    Train LSTM and save as both .h5 (Keras) and .onnx (for Render API).
+    Returns the ONNX path instead of the Keras model object — the API
+    only needs ONNX at inference time (no TensorFlow on Render).
+    """
     import tensorflow as tf
     from tensorflow.keras.models import Sequential
     from tensorflow.keras.layers import LSTM, Dense, Dropout
     from tensorflow.keras.callbacks import EarlyStopping
+    import tf2onnx
+    import onnx
 
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(train_series.reshape(-1, 1)).flatten()
@@ -118,6 +128,7 @@ def train_lstm(train_series, val_steps=8):
         raise ValueError("Not enough data for LSTM")
 
     X = X.reshape(X.shape[0], X.shape[1], 1)
+
     model = Sequential([
         LSTM(64, return_sequences=True, input_shape=(LOOKBACK, 1)),
         Dropout(0.2),
@@ -130,6 +141,7 @@ def train_lstm(train_series, val_steps=8):
     model.fit(X, y, epochs=100, batch_size=16,
               validation_split=0.1, callbacks=[es], verbose=0)
 
+    # ── Validation predictions ──────────────────────────────────────────
     history = list(scaled[-LOOKBACK:])
     preds_scaled = []
     for _ in range(val_steps):
@@ -137,11 +149,28 @@ def train_lstm(train_series, val_steps=8):
         p = float(model.predict(seq, verbose=0)[0][0])
         preds_scaled.append(p)
         history.append(p)
-
     preds = scaler.inverse_transform(np.array(preds_scaled).reshape(-1, 1)).flatten()
-    return model, scaler, np.maximum(preds, 0)
+
+    # ── Save Keras weights (.h5) ────────────────────────────────────────
+    h5_path   = os.path.join(model_dir, f"{state_key}_lstm.h5")
+    onnx_path = os.path.join(model_dir, f"{state_key}_lstm.onnx")
+    model.save(h5_path)
+
+    # ── Convert to ONNX ─────────────────────────────────────────────────
+    input_signature = [tf.TensorSpec(shape=(None, LOOKBACK, 1),
+                                     dtype=tf.float32, name="input")]
+    onnx_model, _ = tf2onnx.convert.from_keras(
+        model, input_signature=input_signature, opset=13
+    )
+    onnx.save(onnx_model, onnx_path)
+    print(f"    ONNX saved → {onnx_path}")
+
+    return onnx_path, scaler, np.maximum(preds, 0)
 
 
+# ─────────────────────────────────────────────
+# Main training loop
+# ─────────────────────────────────────────────
 
 def train_all_models(df, model_dir="models", val_weeks=8):
     os.makedirs(model_dir, exist_ok=True)
@@ -159,14 +188,15 @@ def train_all_models(df, model_dir="models", val_weeks=8):
             continue
 
         print(f"  Data: {len(train)} train rows, {len(val)} val rows, "
-              f"Sales range: {sdf['Sales'].min():.0f} - {sdf['Sales'].max():.0f}")
+              f"Sales range: {sdf['Sales'].min():.0f} – {sdf['Sales'].max():.0f}")
 
         if len(train) < 20 or len(val) < val_weeks:
             print(f"  ⚠ Skipping: not enough rows")
             continue
 
-        y_val = val["Sales"].values
-        results = {}
+        y_val     = val["Sales"].values
+        state_key = state.replace(" ", "_")
+        results   = {}
 
         # 1. SARIMA
         try:
@@ -192,11 +222,18 @@ def train_all_models(df, model_dir="models", val_weeks=8):
         except Exception as e:
             print(f"  XGBoost → FAILED: {e}")
 
-        # 4. LSTM
+        # 4. LSTM  → saved as ONNX, artifact stores onnx_path (not the model object)
         try:
-            m, scaler, preds = train_lstm(train["Sales"].values, val_weeks)
-            results["LSTM"] = {"metrics": evaluate(y_val, preds), "model": m,
-                               "scaler": scaler, "preds": preds}
+            onnx_path, scaler, preds = train_lstm(
+                train["Sales"].values, val_steps=val_weeks,
+                state_key=state_key, model_dir=model_dir
+            )
+            results["LSTM"] = {
+                "metrics":   evaluate(y_val, preds),
+                "onnx_path": onnx_path,   # ← path string, not the model
+                "scaler":    scaler,
+                "preds":     preds,
+            }
             print(f"  LSTM    → MAPE: {results['LSTM']['metrics']['MAPE']:.1f}%")
         except Exception as e:
             print(f"  LSTM    → FAILED: {e}")
@@ -206,24 +243,30 @@ def train_all_models(df, model_dir="models", val_weeks=8):
             continue
 
         best_name = min(results, key=lambda k: results[k]["metrics"]["MAPE"])
-        best = results[best_name]
+        best      = results[best_name]
         print(f"  ✅ Best: {best_name} (MAPE {best['metrics']['MAPE']:.1f}%)\n")
 
-        state_key = state.replace(" ", "_")
+        # ── Build artifact ───────────────────────────────────────────────
         artifact = {
-            "state": state,
+            "state":      state,
             "model_name": best_name,
-            "metrics": best["metrics"],
-            "model": best["model"],
+            "metrics":    best["metrics"],
         }
+
         if best_name == "LSTM":
-            artifact["scaler"] = best["scaler"]
+            # Store ONNX path + scaler only — NO Keras model object
+            artifact["onnx_path"] = best["onnx_path"]
+            artifact["scaler"]    = best["scaler"]
+            artifact["model"]     = None   # placeholder so downstream code doesn't break
+        else:
+            artifact["model"] = best["model"]
+
         joblib.dump(artifact, f"{model_dir}/{state_key}_best_model.pkl")
 
         for model_name, res in results.items():
             summary_rows.append({
                 "state": state, "model": model_name,
-                "best": model_name == best_name,
+                "best":  model_name == best_name,
                 **res["metrics"],
             })
 
@@ -237,7 +280,7 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from utils.data_preprocessing import prepare_data
-    df = prepare_data("data/sales_data.xlsx")
+    df      = prepare_data("data/sales_data.xlsx")
     summary = train_all_models(df)
     if not summary.empty and "best" in summary.columns:
-        print(summary[summary["best"] == True][["state","model","MAPE"]].to_string(index=False))
+        print(summary[summary["best"] == True][["state", "model", "MAPE"]].to_string(index=False))
