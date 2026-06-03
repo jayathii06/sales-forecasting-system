@@ -1,4 +1,4 @@
-# Sales Forecasting System — Documentation
+# Sales Forecasting System - Documentation
 
 ## Overview
 
