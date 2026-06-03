@@ -11,7 +11,6 @@ This is a **production-ready end-to-end time series forecasting system** that:
 ---
 
 ## Project Structure
-
 ```
 forecasting_project/
 │
